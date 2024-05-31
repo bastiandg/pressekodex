@@ -6,13 +6,14 @@ import re
 import requests
 import argparse
 import subprocess
-from llm_helper import initLlm, getLlmReply
-import sys
+from llm_helper import getLlmReply
+# import sys
 from dotenv import load_dotenv
 import json
 from bs4 import BeautifulSoup
 
 
+systemMessage = None
 systemMessageFile = "prompts/system-message.md"
 model = None
 PANDOC_COMMAND = ['pandoc', '-f', 'gfm', '-t', 'html', '-o']
@@ -35,7 +36,7 @@ def openBrowser(filename):
         print(f"An error occurred: {e}")
 
 
-def downloadImage(article, filenameBase):
+def downloadImage(article, downloadDirectory):
     if 'opengraph' not in article.infos.keys() \
             or 'image' not in article.infos['opengraph'].keys() \
             or article.infos['opengraph']['image'] == "":
@@ -46,7 +47,7 @@ def downloadImage(article, filenameBase):
         imageUrl = article.infos['opengraph']['image'][0]
     imageUrlParameters = imageUrl.split("?")
     imageExtension = imageUrlParameters[0].split("/")[-1].split(".")[-1]
-    filename = f"{filenameBase.replace(' ', '-')}.{imageExtension}"
+    filename = f"{downloadDirectory}/cover.{imageExtension}"
     try:
         response = requests.get(imageUrl, stream=True)
 
@@ -61,32 +62,11 @@ def downloadImage(article, filenameBase):
         return None
 
 
-def harmcheck(article, filenameBase):
-    harmcheckReply = getLlmReply(
-        promptName=f"Checking for harms in \"{article.title}\"",
-        promptTemplateFile="prompts/harmcheck.md",
-        outputFilename=f"{filenameBase}-harmcheck.md",
-        templateStringVariables={
-            "article": article.cleaned_text,
-            "url": article.canonical_link,
-            "title": article.title
-        }
-    )
-    pattern = r"^\*?\*?Harmful Content\*?\*?:.*(No|Yes).*$"
-    match = re.search(pattern, harmcheckReply, re.MULTILINE | re.IGNORECASE)
-
-    if match:
-        harmful_text = match.group(1).lower()
-        harmful = (harmful_text == "yes")
-    else:
-        harmful = False
-    return harmful, harmcheckReply
-
-
 def init():
     global model
     global url
     global articleBaseDir
+    global systemMessage
 
     load_dotenv()
 
@@ -101,7 +81,6 @@ def init():
     articleBaseDir = args.article_base_dir
     with open(systemMessageFile, 'r') as file:
         systemMessage = file.read()
-    initLlm(systemMessage)
 
     print(f'URL: {url}')
     print(f'Article base directory: {articleBaseDir}')
@@ -126,38 +105,57 @@ article = g.extract(url=url)
 match = re.search(DOMAIN_PATTERN, url)
 domain = match.group(1)
 
-articleDir = f"{articleBaseDir}/{domain}"
-
-os.makedirs(articleDir, exist_ok=True)
-
-filenameBase = re.sub(r"[^\w\- ]+", "", article.title)
-filenameBase = re.sub(r" +", " ", filenameBase)
-if len(filenameBase) > 50:
-    filenameBase = filenameBase[:50]
-filenameBase = filenameBase.strip()
-filenameBase = f"{articleDir}/{filenameBase}"
-
-with open(filenameBase + ".txt", 'w') as f:
-    f.write(article.cleaned_text)
-
 if domain != "nius.de":
     articleText = article.cleaned_text
 else:
     articleText = niusExtract(article)
 
-with open("sections/01.txt", 'r') as file:
-    pressekodex_section = file.read()
-imageFilename = downloadImage(article, filenameBase)
+title = re.sub(r"[^\w\- ]+", "", article.title)
+title = re.sub(r" +", " ", title)
+title = title.strip()
+titleWords = title.split(" ")
+if len(titleWords) > 5:
+    title = "-".join(titleWords[:5])
+articleDir = f"{articleBaseDir}/{domain}/{title}"
+os.makedirs(articleDir, exist_ok=True)
 
-complianceReply = getLlmReply(
-    promptName=f"Compliance Check article \"{article.title}\"",
-    promptTemplateFile="prompts/compliance.md",
-    templateStringVariables={
-        "pressekodex_section": pressekodex_section,
-        "article": articleText,
-        "title": article.title
-    },
-    outputFilename=f"{articleDir}/01.txt"
-)
+with open(f"{articleDir}/article.txt", 'w') as f:
+    f.write(articleText)
+imageFilename = downloadImage(article, articleDir)
 
-print(complianceReply)
+totalCost = 0
+
+for i in range(1, 17):
+    pressekodexSectionPath = f"selected-sections/{i:02d}.txt"
+    evaluationFilename = f"{articleDir}/{i:02d}.txt"
+    if not os.path.exists(pressekodexSectionPath):
+        continue
+    with open(pressekodexSectionPath, 'r') as file:
+        pressekodexSection = file.read()
+    sectionTitle = pressekodexSection.split('\n')[0]
+
+    if not os.path.exists(evaluationFilename):
+        complianceReply, callCost = getLlmReply(
+            modelClass="haiku",
+            promptName=f"Compliance Check for pressekodex section {i} article \"{article.title}\"",
+            promptTemplateFile="prompts/compliance.md",
+            systemMessage=systemMessage,
+            templateStringVariables={
+                "pressekodex_section": pressekodexSection,
+                "article": articleText,
+                "title": article.title
+            },
+            outputFilename=evaluationFilename
+        )
+        print(f"Cost: {callCost}")
+        totalCost += callCost
+    else:
+        with open(evaluationFilename, 'r') as file:
+            complianceReply = file.read()
+    soup = BeautifulSoup(complianceReply, "lxml")
+    isCompliantString = re.sub(r'[\s\n]+', "", soup.find("compliant").text)
+    isCompliant = isCompliantString.lower() == "yes"
+    print(f"{sectionTitle}: {isCompliant}")
+
+
+print(f"\ntotalCost: {totalCost}")
