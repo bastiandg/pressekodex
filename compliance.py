@@ -91,7 +91,7 @@ def generateHtmlTable(headers, data):
         for header in headers:
             if header == "compliant":
                 compliantValue = "yes" if item[header] else "no"
-                color = "green" if item[header] else "red"
+                color = "#66FF66" if item[header] else "#FF6666"
                 html += f"    <td style='background-color: {color}; font-weight: bold; text-align: center;'>{compliantValue}</td>\n"
             else:
                 if isinstance(item[header], str):
@@ -109,7 +109,7 @@ def processComplianceReply(sectionNumber, sectionTitle, complianceReply):
     soup = BeautifulSoup(complianceReply, "lxml")
     isCompliantString = re.sub(r'[\s\n]+', "", soup.find("compliant").text)
     isCompliant = isCompliantString.lower() == "yes"
-    reasoning = soup.find("reasoning").text.strip().split("\n\n")[-1]
+    reasoning = soup.find("reasoning").text.strip()
     processedReply = {
         "ziffer": sectionNumber,
         "title": sectionTitle,
